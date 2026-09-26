@@ -457,7 +457,10 @@
       <div class="ki-row" onclick="askSuggest('Wie funktioniert der Score?')"><span class="icon">📊</span><span>Score-Logik erklären</span></div>
       <div class="ki-row" onclick="askSuggest('Wie erkenne ich sichere Coins?')"><span class="icon">🛡️</span><span>Sichere Coins erkennen</span></div>
       <div class="ki-row" onclick="askSuggest('Was ist ein Rug Pull?')"><span class="icon">🕳️</span><span>Rug Pull prüfen</span></div>
+      <div class="ki-row" onclick="askSuggest('Warum kauft der Bot gerade nicht?')"><span class="icon">🤔</span><span>Warum kauft er gerade nicht?</span></div>
       <div class="ki-row" onclick="askSuggest('Was hat der Bot zuletzt verbessert?')"><span class="icon">🛠️</span><span>Was hat der Bot verbessert?</span></div>
+      <div class="ki-row" onclick="askSuggest('Wie ist mein Kontostand und PnL?')"><span class="icon">💰</span><span>Kontostand & PnL</span></div>
+      <div class="ki-row" onclick="askSuggest('Was sind die aktuellen Einstellungen?')"><span class="icon">⚙️</span><span>Aktuelle Einstellungen</span></div>
     </div>
 
     <input type="file" id="imgFileInput" accept="image/*" multiple style="display:none;">
@@ -796,28 +799,164 @@ function openRugcheck(address){
 
 
 
+// ---- Live-Diagnose: "Warum kauft der Bot gerade nicht?" (echte Auswertung des aktuellen Zustands, kein Textbaustein) ----
+function explainWhyNotBuying(){
+  if(!state.botRunning) return "Der Bot ist aktuell gestoppt (Schalter im Dashboard ist aus) — deshalb kauft er nichts, unabhängig von den Signalen.";
+  const reasons = [];
+  if(Date.now() < state.cooldownUntil){
+    const minLeft = Math.ceil((state.cooldownUntil-Date.now())/60000);
+    reasons.push(`Kaufpause nach 3 Verlusten in Folge läuft noch ~${minLeft} Min.`);
+  }
+  if(state.positions.length >= state.maxPositions){
+    reasons.push(`Alle ${state.maxPositions} Positionsplätze sind gerade belegt.`);
+  }
+  const latestBatch = state.signals.slice(0, 40); // dedupliziert, neuester Scan zuerst
+  if(!latestBatch.length) return "Es gibt noch keine Scan-Daten — sobald der erste Scan durch ist, kann ich das genauer sagen.";
+  const bestScore = Math.max(...latestBatch.map(s=>s.score));
+  const aboveThreshold = latestBatch.filter(s=>s.score>=state.threshold);
+  if(!aboveThreshold.length){
+    reasons.push(`Kein aktuell gescannter Coin erreicht die Score-Schwelle von ${state.threshold} (bester gerade: ${bestScore}).`);
+  } else {
+    let blocked=0, notConfirmed=0, gateFail=0, pendingRug=0, rugBlocked=0;
+    aboveThreshold.forEach(s=>{
+      const blacklisted = state.blacklist[s.address] && Date.now() < state.blacklist[s.address];
+      if(blacklisted){ blocked++; return; }
+      if((confirmMap[s.address]||0) < 2){ notConfirmed++; return; }
+      if(s.liquidity < state.minLiquidity || (s.buySellRatio||0) < state.minBuySellRatioGate || (s.ageHours||0) < state.minAgeHoursGate){ gateFail++; return; }
+      const rug = rugCache[s.address];
+      if(!rug || (Date.now()-rug.ts) >= RUG_CACHE_MS){ pendingRug++; return; }
+      if(!rug.safe){ rugBlocked++; return; }
+    });
+    if(blocked) reasons.push(`${blocked} Coin(s) über der Schwelle sind gerade gesperrt (Verlust-Cooldown auf diesem Coin).`);
+    if(notConfirmed) reasons.push(`${notConfirmed} Coin(s) über der Schwelle warten noch auf die 2. Bestätigung (Score muss 2 Scans in Folge halten).`);
+    if(gateFail) reasons.push(`${gateFail} Coin(s) über der Schwelle erfüllen (noch) nicht alle Kauf-Gates (Liquidität ≥ $${formatK(state.minLiquidity)}, Alter ≥ ${state.minAgeHoursGate} Std, Buy/Sell-Ratio ≥ ${state.minBuySellRatioGate}).`);
+    if(pendingRug) reasons.push(`${pendingRug} Coin(s) werden gerade erst per Rugcheck geprüft — Ergebnis kommt zum nächsten Scan.`);
+    if(rugBlocked) reasons.push(`${rugBlocked} Coin(s) wurden von Rugcheck als riskant eingestuft und übersprungen.`);
+  }
+  if(!reasons.length) reasons.push("Eigentlich müsste gerade gekauft werden können — evtl. genau zwischen zwei Scans, versuch's in ein paar Sekunden nochmal.");
+  return reasons.join(' ');
+}
+
+function explainBalanceAndPnl(){
+  const totalPnl = state.history.reduce((a,h)=>a+h.pnl,0);
+  const pct = state.startBalance ? (totalPnl/state.startBalance*100).toFixed(1) : 0;
+  return `Aktueller Kontostand: ${state.balance.toFixed(2)} SOL (Start dieser Runde: ${state.startBalance.toFixed(2)} SOL). Gesamt-PnL: ${(totalPnl>=0?'+':'')}${totalPnl.toFixed(3)} SOL (${(totalPnl>=0?'+':'')}${pct}%).`;
+}
+function explainOpenPositions(){
+  if(!state.positions.length) return "Gerade keine offenen Positionen.";
+  const list = state.positions.map(p=>`${p.symbol} (${p.size} SOL, ${(p.pnlPct||0)>=0?'+':''}${(p.pnlPct||0).toFixed(1)}%)`).join(', ');
+  return `${state.positions.length} offene Position(en): ${list}.`;
+}
+function explainSettings(){
+  return `Aktuell: Score-Schwelle ${state.threshold}, Stop-Loss ${state.stopLossPct}%, Take-Profit ${state.takeProfitPct}%, Timeout ${state.timeoutMin} Min, Mindest-Liquidität $${formatK(state.minLiquidity)}, max. ${state.maxPositions} Positionen, Positionsgröße ${state.tradeSize} SOL, Gebühren/Slippage ${state.feeSlippagePct}%. Vom Bot selbst laufend nachjustiert: Momentum-Deckel ${state.momentumCapPct}%, Mindestalter ${state.minAgeHoursGate} Std, Mindest-Buy/Sell-Ratio ${state.minBuySellRatioGate}.`;
+}
+function explainBestSignal(){
+  if(!state.signals.length) return "Noch keine Scan-Daten vorhanden — der erste Scan läuft gerade oder der Bot ist gestoppt.";
+  const best = state.signals.slice(0,40).reduce((a,b)=> (!a || b.score>a.score) ? b : a, null);
+  return `Aktuell bester Coin im letzten Scan: ${best.symbol}, Score ${best.score}, Liquidität $${formatK(best.liquidity)}, MC $${formatK(best.mcap)} — ${best.action==='KAUF' ? 'liegt über der Kauf-Schwelle' : 'liegt (noch) unter der Schwelle von '+state.threshold}.`;
+}
+function explainLastTrade(){
+  if(!state.history.length) return "In dieser Runde ist noch kein Trade abgeschlossen.";
+  const h = state.history[0];
+  return `Letzter abgeschlossener Trade: ${h.symbol}, ${h.pnl>=0?'+':''}${h.pnl.toFixed(3)} SOL (${h.pnlPct}%), Grund: ${h.reason}, um ${h.closedAt}.`;
+}
+function explainWinRate(){
+  if(!state.history.length) return "Noch keine Trades in dieser Runde, daher noch keine Trefferquote.";
+  const wins = state.history.filter(h=>h.pnl>0).length;
+  const rate = Math.round(wins/state.history.length*100);
+  return `Trefferquote bisher: ${rate}% (${wins} von ${state.history.length} Trades gewonnen).`;
+}
+
 // ---- KI Wissens-Assistent (lokal, regelbasiert) ----
 const KI_KB = [
   {k:['rug','rug pull'], a:"Ein Rug Pull ist, wenn die Entwickler eines Coins plötzlich die Liquidität abziehen oder alle ihre Token verkaufen — der Preis stürzt auf nahe 0. Warnzeichen: sehr niedrige/nicht gelockte Liquidität, anonymes Team, Top-Wallet hält >20% der Supply."},
-  {k:['score','bewertung','wie funktioniert der score'], a:"Der Score (0–100) im Bot setzt sich zusammen aus: Liquidität (mehr = sicherer), Volumen im Verhältnis zur Marktkapitalisierung (echte Handelsaktivität), kurzfristiges Momentum, Alter des Tokens (zu neu = riskanter) und dem Käufer/Verkäufer-Verhältnis. Ab dem eingestellten Schwellenwert löst er ein Kauf-Signal aus."},
+  {k:['score','bewertung','wie funktioniert der score'], a:"Der Score (0–100) im Bot setzt sich zusammen aus: Liquidität (mehr = sicherer), Volumen im Verhältnis zur Marktkapitalisierung (echte Handelsaktivität), kurzfristiges Momentum (mit einem Deckel, damit schon stark gepumpte Coins nicht bevorzugt werden), Alter des Tokens (zu neu = riskanter) und dem Käufer/Verkäufer-Verhältnis. Ab dem eingestellten Schwellenwert löst er ein Kauf-Signal aus."},
   {k:['honeypot'], a:"Ein Honeypot ist ein Coin, den man kaufen, aber nicht wieder verkaufen kann — im Smart Contract eingebaut. Der Bot fragt vor jedem echten Kauf automatisch Rugcheck ab und überspringt Coins mit kritischem Risiko; ist Rugcheck gerade nicht erreichbar, kannst du zusätzlich manuell über den Rug-Button je Coin prüfen."},
+  {k:['rugcheck'], a:"Rugcheck.xyz analysiert einen Solana-Contract auf typische Risiken (z. B. nicht aufgegebene Mint-Autorität, ungesperrte Liquidität, verdächtige Wallet-Verteilung). Der Bot fragt das vor jedem echten Kauf automatisch ab; bei kritischem Risiko wird der Coin übersprungen und für eine Stunde gesperrt."},
   {k:['liquidität','liquidity'], a:"Liquidität ist das Kapital im Handelspool. Niedrige Liquidität heißt: schon kleine Käufe/Verkäufe bewegen den Preis stark, und ein Ausstieg der Entwickler wirkt sich extrem aus. Gesperrte ('locked') Liquidität ist ein positives Zeichen."},
   {k:['marktkapitalisierung','market cap','mcap','fdv'], a:"Marktkapitalisierung = Preis × zirkulierende Supply, FDV = Preis × Gesamt-Supply (auch nicht freigeschaltete Token). Bei Memecoins oft sehr volatil und wenig aussagekräftig ohne Liquiditäts-Kontext."},
   {k:['sicher','sicherheit','erkenne','worauf achten'], a:"Grobe Checkliste: gesperrte/verbrannte Liquidität, verifizierter/renounced Contract, keine extreme Wallet-Konzentration, organisches Volumen statt Wash-Trading, aktive echte Community statt reinen Bot-Kommentaren. Trotzdem bleibt jeder Memecoin hochriskant."},
-  {k:['stop loss', 'stoploss'], a:"Ein Stop-Loss verkauft automatisch, wenn der Verlust eine Schwelle erreicht (im Bot z. B. −20%), um größere Verluste zu begrenzen."},
-  {k:['take profit'], a:"Take-Profit verkauft automatisch bei einem festgelegten Gewinn (im Bot z. B. +60%), um Gewinne zu sichern, bevor der Preis wieder fällt."},
+  {k:['stop loss', 'stoploss', 'stop-loss'], a:"Ein Stop-Loss verkauft automatisch, wenn der Verlust eine Schwelle erreicht, um größere Verluste zu begrenzen. Der Bot passt diesen Wert selbst an, wenn zu viele Trades darüber aussteigen — frag nach 'aktuelle Einstellungen' für den genauen Wert gerade."},
+  {k:['take profit','take-profit'], a:"Take-Profit verkauft automatisch bei einem festgelegten Gewinn, um ihn zu sichern, bevor der Preis wieder fällt. Der Bot senkt diesen Wert leicht, wenn Trades öfter erst im Timeout statt am Take-Profit enden — frag nach 'aktuelle Einstellungen' für den genauen Wert gerade."},
+  {k:['trailing'], a:"Der Trailing-Stop merkt sich den bisherigen Höchststand eines Trades. War der Trade schon deutlich im Plus und gibt dann wieder einen Teil davon ab, wird verkauft, statt auf das feste Take-Profit-Ziel oder den Timeout zu warten — sichert Gewinne, die sonst wieder verpufft wären."},
+  {k:['teilverkauf','partial'], a:"Beim ersten Kursziel verkauft der Bot die Hälfte der Position (Gewinn sichern), der Rest läuft mit Trailing-Stop weiter — falls der Coin noch weiter steigt, ist noch etwas dabei, ohne das ganze Risiko zu behalten."},
+  {k:['cooldown','pause','sperre nach verlust'], a:"Nach 3 Verlust-Trades in Folge legt der Bot 5 Minuten Kaufpause ein, um nicht in einer schlechten Marktphase weiter Kapital zu verbrennen."},
+  {k:['blacklist','gesperrt'], a:"Ein Coin, der mit Verlust verkauft wurde, ist 10 Minuten gesperrt (kein erneuter Kauf), damit der Bot nicht direkt wieder in denselben schlechten Trade läuft. Ein Rugcheck-kritischer Coin wird für eine Stunde gesperrt."},
+  {k:['bestätigung','2 scans','confirm'], a:"Ein Score über der Schwelle muss zwei Scans in Folge (also ~10 Sekunden) bestehen bleiben, bevor gekauft wird — filtert kurze Ausreißer-Werte raus."},
+  {k:['positionsgröße','wie viel wird gekauft'], a:"Die Positionsgröße skaliert mit der Score-Stärke: bei Score genau an der Schwelle wird mit 0,7x der eingestellten Grundgröße gekauft, bei Score 100 mit bis zu 1,5x."},
+  {k:['gebühren','fee','slippage prozent'], a:"Der Bot rechnet bei jedem Trade automatisch Gebühren/Slippage ab, weil das in echt bei so geringer Liquidität nie 0 wäre — frag nach 'aktuelle Einstellungen' für den genauen Prozentsatz gerade."},
+  {k:['datenquelle','live daten','woher kommen die daten','demo modus'], a:"Reale Daten kommen zuerst von DexScreener; ist das gerade nicht erreichbar, versucht der Bot automatisch GeckoTerminal. Klappt beides nicht, zeigt er Demo-Daten (erkennbar am gelben DEMO-Badge oben) statt fiktiv 'live' zu wirken."},
+  {k:['axiom'], a:"Der 📈 Chart-Button öffnet die Trading-Ansicht des Coins bei Axiom — schneller Zugriff auf echten Chart und Orderbuch, außerhalb des Bots."},
+  {k:['telegram'], a:"Telegram-Alarme sind aktuell noch nicht eingebaut — der Bot zeigt Käufe/Verkäufe bisher nur als Toast/Log in der App. Sag Bescheid, wenn ich das über deinen Cloudflare-Worker ergänzen soll."},
   {k:['pump.fun','bonding curve'], a:"Bonding-Curve-Plattformen wie pump.fun lassen jeden ohne Coding einen Token launchen; der Preis folgt einer festen Kurve, bis genug Kapital für einen DEX-Pool erreicht ist. Sehr hohes Rug- und Volatilitätsrisiko wegen fehlender Prüfung."},
   {k:['wash trading'], a:"Wash Trading heißt, dass jemand künstlich gegen sich selbst handelt, um Volumen vorzutäuschen. Achte auf unrealistisch hohes Volumen bei wenigen Wallets."},
   {k:['diversifikation','diversifizieren'], a:"Bei hochriskanten Memecoins ist Diversifikation über viele kleine Positionen (statt alles auf einen Coin) eine gängige Methode, um Einzel-Rug-Risiko abzufedern — Gesamtrisiko bleibt trotzdem hoch."},
+  {k:['fomo'], a:"FOMO ('Fear Of Missing Out') ist die Angst, einen laufenden Pump zu verpassen, und führt oft zum Kauf kurz vor dem Abverkauf. Der Bot begrenzt das über den Momentum-Deckel im Score — schon stark gepumpte Coins bekommen keinen vollen Score-Bonus mehr."},
+  {k:['dyor'], a:"DYOR = 'Do Your Own Research' — auch bei einem hohen Bot-Score keine Garantie, sondern eine Erinnerung, zusätzlich selbst zu prüfen (Chart, Rugcheck, Team, Social Media)."},
+  {k:['ath','all time high'], a:"ATH = All-Time-High, der bisher höchste Preis eines Coins. Bei Memecoins oft kurz nach Launch, danach häufig starker Rückgang."},
+  {k:['dip','buy the dip'], a:"Ein Dip ist ein kurzfristiger Kursrückgang. 'Buy the dip' bedeutet, gezielt in so einer Schwächephase zu kaufen — bei Memecoins riskant, weil ein Dip auch der Anfang eines Rug Pulls sein kann."},
+  {k:['whale'], a:"Ein Whale ist eine Wallet, die einen großen Anteil der Coin-Supply hält. Verkauft ein Whale, kann das den Preis stark drücken — daher ist Wallet-Konzentration ein wichtiges Risikomerkmal."},
+  {k:['sniper','snipe'], a:"Sniper-Bots kaufen einen Coin automatisiert in den ersten Sekunden nach Launch, oft bevor Menschen überhaupt reagieren können. Das erklärt, warum ganz frische Coins oft schon stark bewegte Charts haben."},
+  {k:['renounce','renounced','mint authority'], a:"Ein 'renounced' Contract hat keine Mint-Autorität mehr — die Entwickler können also nicht nachträglich beliebig neue Token erzeugen und den Preis verwässern. Ein Pluspunkt bei der Sicherheitsprüfung."},
+  {k:['dev wallet','entwickler-wallet','team wallet'], a:"Die Dev-Wallet hält oft einen Teil der Coin-Supply direkt vom Launch. Ein hoher Anteil dort ist ein Risiko, weil ein Verkauf der Entwickler den Kurs einbrechen lassen kann."},
+  {k:['airdrop'], a:"Ein Airdrop verteilt Token kostenlos an Wallets, oft um Aufmerksamkeit/Community aufzubauen. Kann legitim sein, wird aber auch genutzt, um künstlich viele Halter für einen späteren Pump zu erzeugen."},
+  {k:['presale','vorverkauf'], a:"Bei einem Presale kaufen ausgewählte Wallets vor dem öffentlichen Launch günstiger ein — sie können beim Launch mit hohem Gewinn sofort verkaufen, was den Kurs für alle anderen drückt."},
+  {k:['kol','influencer'], a:"KOL steht für 'Key Opinion Leader' — Krypto-Influencer, die gegen Bezahlung einen Coin pushen. Ein Pump durch KOLs sagt nichts über die Qualität des Coins aus, oft verkaufen die KOLs selbst direkt danach."},
+  {k:['blue chip','bluechip'], a:"Als 'Blue Chip' bezeichnet man etablierte, seit langem gehandelte Coins mit hoher Liquidität und Bekanntheit (z. B. BONK, WIF) — im Gegensatz zu ganz frischen, unbekannten Memecoins, wie sie der Bot hauptsächlich scannt."},
 ];
 function answerKI(q){
-  const ql = q.toLowerCase();
+  const ql = q.toLowerCase().trim();
+
+  // ---- Small Talk / Kommunikation ----
+  if(/^(hi|hey|hallo|servus|moin|yo)\b/.test(ql) || ql.includes('guten morgen') || ql.includes('guten abend') || ql.includes('guten tag')){
+    return "Hey! Frag mich zu Memecoin-Konzepten (Rug Pull, Score, Honeypot, ...) oder zum aktuellen Bot-Zustand (Kontostand, offene Positionen, warum er gerade (nicht) kauft, letzter Trade, Trefferquote, Einstellungen).";
+  }
+  if(ql.includes('wie geht') && (ql.includes(' dir') || ql.includes(' es dir'))){
+    return "Läuft — scanne fleißig weiter 🧠. Und bei dir, alles gut mit dem Bot?";
+  }
+  if(/danke/.test(ql)){
+    return "Gerne! Frag jederzeit weiter.";
+  }
+  if(ql.includes('wer bist du') || ql.includes('was bist du') || (ql.includes('was kannst du') && !ql.includes('kaufen'))){
+    return "Ich bin die eingebaute Memecoin-KI dieses Bots — ein lokaler, regelbasierter Assistent (keine echte KI-Anbindung/Internet, läuft nur mit dem, was der Bot selbst weiß). Ich kann Memecoin-Konzepte erklären und live über den aktuellen Bot-Zustand Auskunft geben: Kontostand/PnL, offene Positionen, letzter Trade, Trefferquote, aktuelle Einstellungen, bestes aktuelles Signal, und warum gerade (nicht) gekauft wird.";
+  }
+  if(/^(tschüss|bye|ciao|man sieht sich)\b/.test(ql)){
+    return "Bis später! Der Bot scannt auch weiter, wenn du hier raus bist.";
+  }
+
+  // ---- Live-Fragen zum aktuellen Bot-Zustand ----
+  const asksWhyNotBuying = (ql.includes('kauft') || ql.includes('käuf') || ql.includes('kaufen') || ql.includes('trades') || ql.includes('position'))
+    && (ql.includes('nicht') || ql.includes('keine') || ql.includes('kein '));
+  if(asksWhyNotBuying) return explainWhyNotBuying();
+
   if(ql.includes('verbessert') || ql.includes('optimier') || ql.includes('gelernt')){
-    if(!state.improvements.length) return "Bisher hat der Bot noch keine Trades genug abgeschlossen, um etwas anzupassen. Sobald ein paar Trades durch sind, justiert er Schwelle, Stop-Loss und Timeout automatisch nach — schau in die Box oben.";
+    if(!state.improvements.length) return "Bisher hat der Bot noch keine Trades genug abgeschlossen, um etwas anzupassen. Sobald ein paar Trades durch sind, justiert er Schwelle, Stop-Loss, Timeout und die Kauf-Gates automatisch nach — schau in die Box oben.";
     return "Letzte Anpassungen:\n" + state.improvements.slice(0,5).map(i=>"• "+i.msg).join("\n");
   }
+  if((ql.includes('kontostand') || ql.includes('balance') || ql.includes('wie viel sol') || ql.includes('pnl') || ql.includes('gewinn') && ql.includes('bisher'))){
+    return explainBalanceAndPnl();
+  }
+  if(ql.includes('offene position') || ql.includes('offenen position') || (ql.includes('position') && (ql.includes('wie viele') || ql.includes('welche')))){
+    return explainOpenPositions();
+  }
+  if(ql.includes('aktuelle einstellung') || ql.includes('welche einstellung') || ql.includes('aktuellen einstellung') || (ql.includes('einstellung') && ql.includes('gerade'))){
+    return explainSettings();
+  }
+  if(ql.includes('bester coin') || ql.includes('bestes signal') || ql.includes('top coin') || ql.includes('höchster score')){
+    return explainBestSignal();
+  }
+  if(ql.includes('letzter trade') || ql.includes('letzten trade') || ql.includes('letzte trade')){
+    return explainLastTrade();
+  }
+  if(ql.includes('trefferquote') || ql.includes('winrate') || ql.includes('win rate') || ql.includes('hit rate')){
+    return explainWinRate();
+  }
+
+  // ---- Feste Wissensbasis ----
   for(const item of KI_KB){ if(item.k.some(kw=>ql.includes(kw))) return item.a; }
-  return "Dazu habe ich keine feste Antwort in meiner lokalen Wissensbasis. Ich bin ein einfacher regelbasierter Assistent (keine echte KI-Anbindung) — versuch's z. B. mit Rug Pull, Score, Honeypot, Liquidität, Stop-Loss oder Marktkapitalisierung.";
+
+  // ---- Fallback: ehrlich, aber hilfreicher als ein blankes "weiß ich nicht" ----
+  return "Das habe ich nicht sicher im Griff — ich bin ein lokaler, regelbasierter Assistent ohne echte KI-Anbindung. Frag gern nochmal anders, z. B. zu: Rug Pull, Score, Honeypot, Liquidität, Stop-Loss/Take-Profit, Rugcheck, Datenquelle — oder live zum Bot: Kontostand, offene Positionen, letzter Trade, Trefferquote, aktuelle Einstellungen, bestes Signal, warum gerade (nicht) gekauft wird.";
 }
 let pendingImages = [];
 function addMsg(text, cls, imgs){
@@ -1050,7 +1189,8 @@ async function runScan(){
 
   coins.forEach(c=>{
     const sig={symbol:c.symbol, score:c.score, time:c.time, address:c.address, pairAddress:c.pairAddress, price:c.price,
-      liquidity:Math.round(c.liquidity), mcap:Math.round(c.mcap), action: c.score>=state.threshold?"KAUF":"ignoriert"};
+      liquidity:Math.round(c.liquidity), mcap:Math.round(c.mcap), buySellRatio:c.buySellRatio, ageHours:c.ageHours,
+      action: c.score>=state.threshold?"KAUF":"ignoriert"};
     state.signals.unshift(sig);
     const blacklisted = state.blacklist[c.address] && Date.now() < state.blacklist[c.address];
     const confirmed = (confirmMap[c.address]||0) >= 2;
