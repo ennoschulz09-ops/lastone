@@ -392,7 +392,7 @@
       <div class="mini"><div class="l">Ø / Trade</div><div class="v" id="avgPnl">0.00</div></div>
     </div>
     <div class="card info">
-      Kauf nur, wenn Score ≥ <b id="thresholdLabel2">70</b> <b>zwei Scans in Folge</b> bestätigt wird (Liquidität ≥ $<span id="minLiqLabel">3000</span>), max. <b id="maxPosLabel">5</b> offene Positionen gleichzeitig, Positionsgröße skaliert mit Score-Stärke. Teilverkauf (halbe Position) bei +<span id="partialTpLabel">8</span>%, Rest läuft mit Trailing-Stop weiter. Verkauf spätestens bei +<span id="tpLabel">60</span>% Gewinn, <span id="slLabel">-20</span>% Verlust oder nach <span id="toLabel">15</span> Min. Nach 3 Verlusten in Folge 5 Min Kaufpause, verkaufte Coins 10 Min gesperrt. <span id="feeLabel">2</span>% Gebühren/Slippage je Trade eingerechnet · Werte werden vom Bot selbst nachjustiert (siehe KI-Tab) · reine Simulation, kein echtes Geld.
+      Kauf nur, wenn Score ≥ <b id="thresholdLabel2">70</b> <b>zwei Scans in Folge</b> bestätigt wird (Liquidität ≥ $<span id="minLiqLabel">3000</span>), max. <b id="maxPosLabel">5</b> offene Positionen gleichzeitig, Positionsgröße skaliert mit Score-Stärke. Zusätzlich Rugcheck-Vorabcheck vor jedem Kauf (kritisches Risiko → Coin wird übersprungen und gesperrt) sowie Mindest-Alter und Mindest-Käufer/Verkäufer-Verhältnis, die der Bot selbst hochsetzt, sobald sich das lohnt. Teilverkauf (halbe Position) bei +<span id="partialTpLabel">8</span>%, Rest läuft mit Trailing-Stop weiter. Verkauf spätestens bei +<span id="tpLabel">60</span>% Gewinn, <span id="slLabel">-20</span>% Verlust oder nach <span id="toLabel">15</span> Min. Nach 3 Verlusten in Folge 5 Min Kaufpause, verkaufte Coins 10 Min gesperrt. <span id="feeLabel">2</span>% Gebühren/Slippage je Trade eingerechnet · Werte werden vom Bot selbst nachjustiert (siehe KI-Tab) · reine Simulation, kein echtes Geld. Live-Daten kommen von DexScreener, bei Ausfall automatisch von GeckoTerminal.
     </div>
     <div class="card">
       <h3>Schwelle anpassen</h3>
@@ -440,7 +440,7 @@
 
     <div class="opt-card">
       <h3 style="margin-bottom:8px;">🤖 Selbstoptimierung — lernt aus eigenen Trades</h3>
-      <div class="sub2" style="margin-bottom:8px;">Analysiert automatisch abgeschlossene Bot-Trades und passt Schwelle/Stop-Loss/Timeout an — einfache regelbasierte Selbstjustierung, kein neuronales Netz. Bleibt auch über einen Konto-Reset hinweg erhalten.</div>
+      <div class="sub2" style="margin-bottom:8px;">Analysiert automatisch abgeschlossene Bot-Trades: passt Schwelle/Stop-Loss/Timeout an der Trefferquote an UND vergleicht Einstiegs-Merkmale (Liquidität, Momentum, Käufer/Verkäufer-Verhältnis, Alter) von Gewinnern gegen Verlierer, um gezielt die Kaufkriterien zu schärfen — einfache regelbasierte Selbstjustierung, kein neuronales Netz. Bleibt auch über einen Konto-Reset hinweg erhalten.</div>
       <div id="optLog"><div class="opt-entry">Noch keine Anpassungen — braucht ein paar abgeschlossene Trades.</div></div>
     </div>
 
@@ -503,6 +503,11 @@ if(state.cooldownUntil===undefined) state.cooldownUntil = 0;
 if(state.blacklist===undefined) state.blacklist = {};
 if(state.feeSlippagePct===undefined) state.feeSlippagePct = 2;
 if(state.scoreBandStats===undefined) state.scoreBandStats = {};
+// Feature-basierte Lernparameter: werden von autoImprove() nachjustiert, sobald genug Trades da sind
+// (vergleicht Einstiegs-Merkmale von Gewinnern vs. Verlierern statt nur die Trefferquote insgesamt).
+if(state.momentumCapPct===undefined) state.momentumCapPct = 40;
+if(state.minBuySellRatioGate===undefined) state.minBuySellRatioGate = 0;
+if(state.minAgeHoursGate===undefined) state.minAgeHoursGate = 0;
 if(state.resets===undefined) state.resets = 0;
 if(state.lifetimeTrades===undefined) state.lifetimeTrades = 0;
 if(state.improvements===undefined) state.improvements=[];
@@ -795,7 +800,7 @@ function openRugcheck(address){
 const KI_KB = [
   {k:['rug','rug pull'], a:"Ein Rug Pull ist, wenn die Entwickler eines Coins plötzlich die Liquidität abziehen oder alle ihre Token verkaufen — der Preis stürzt auf nahe 0. Warnzeichen: sehr niedrige/nicht gelockte Liquidität, anonymes Team, Top-Wallet hält >20% der Supply."},
   {k:['score','bewertung','wie funktioniert der score'], a:"Der Score (0–100) im Bot setzt sich zusammen aus: Liquidität (mehr = sicherer), Volumen im Verhältnis zur Marktkapitalisierung (echte Handelsaktivität), kurzfristiges Momentum, Alter des Tokens (zu neu = riskanter) und dem Käufer/Verkäufer-Verhältnis. Ab dem eingestellten Schwellenwert löst er ein Kauf-Signal aus."},
-  {k:['honeypot'], a:"Ein Honeypot ist ein Coin, den man kaufen, aber nicht wieder verkaufen kann — im Smart Contract eingebaut. Ein Contract-Checker (z. B. auf Solscan/Honeypot-Detector-Seiten) hilft, das vor dem Kauf zu prüfen."},
+  {k:['honeypot'], a:"Ein Honeypot ist ein Coin, den man kaufen, aber nicht wieder verkaufen kann — im Smart Contract eingebaut. Der Bot fragt vor jedem echten Kauf automatisch Rugcheck ab und überspringt Coins mit kritischem Risiko; ist Rugcheck gerade nicht erreichbar, kannst du zusätzlich manuell über den Rug-Button je Coin prüfen."},
   {k:['liquidität','liquidity'], a:"Liquidität ist das Kapital im Handelspool. Niedrige Liquidität heißt: schon kleine Käufe/Verkäufe bewegen den Preis stark, und ein Ausstieg der Entwickler wirkt sich extrem aus. Gesperrte ('locked') Liquidität ist ein positives Zeichen."},
   {k:['marktkapitalisierung','market cap','mcap','fdv'], a:"Marktkapitalisierung = Preis × zirkulierende Supply, FDV = Preis × Gesamt-Supply (auch nicht freigeschaltete Token). Bei Memecoins oft sehr volatil und wenig aussagekräftig ohne Liquiditäts-Kontext."},
   {k:['sicher','sicherheit','erkenne','worauf achten'], a:"Grobe Checkliste: gesperrte/verbrannte Liquidität, verifizierter/renounced Contract, keine extreme Wallet-Konzentration, organisches Volumen statt Wash-Trading, aktive echte Community statt reinen Bot-Kommentaren. Trotzdem bleibt jeder Memecoin hochriskant."},
@@ -873,6 +878,32 @@ function askSuggest(q){ document.getElementById('chatInput').value=q; sendChat()
 addMsg("Frag mich etwas über Memecoins — Rug Pulls, Score-Logik, Honeypots, Liquidität oder Sicherheit.",'bot');
 document.getElementById('chatInput').addEventListener('keydown', e=>{ if(e.key==='Enter') sendChat(); });
 
+// ---- Rugcheck-Vorabcheck (Honeypot/Rug-Risiko) vor jedem echten Kauf ----
+let rugCache = {}; // address -> {ts, safe, reason, unknown} — nicht persistiert, nur pro Session
+let rugUnreachableLogged = false; // verhindert Log-Spam, falls die API vom Browser aus nicht erreichbar ist
+const RUG_CACHE_MS = 10*60000;
+async function checkRugSafety(address){
+  try{
+    const res = await fetch('https://api.rugcheck.xyz/v1/tokens/'+address+'/report/summary');
+    if(!res.ok) throw new Error('rugcheck http '+res.status);
+    const data = await res.json();
+    const risks = data.risks || [];
+    const danger = risks.find(r=>(r.level||'').toLowerCase()==='danger');
+    const result = danger
+      ? {ts:Date.now(), safe:false, reason: danger.name || 'kritisches Risiko laut Rugcheck'}
+      : {ts:Date.now(), safe:true, reason:null};
+    rugCache[address] = result;
+  }catch(e){
+    // Rugcheck evtl. per Browser-CORS blockiert oder gerade nicht erreichbar → nicht blockieren
+    // (fail-open), sonst würde der Bot bei jedem API-Ausfall komplett stillstehen.
+    if(!rugUnreachableLogged){
+      rugUnreachableLogged = true;
+      logMsg('⚠️ Rugcheck-API vom Browser aus nicht erreichbar (evtl. CORS) — Vorabcheck wird übersprungen, bis sie wieder antwortet. Ggf. über den Cloudflare-Worker proxien.');
+    }
+    rugCache[address] = {ts:Date.now(), safe:true, reason:null, unknown:true};
+  }
+}
+
 // ---- Scoring ----
 function scoreCoin(c){
   let s=0;
@@ -882,10 +913,11 @@ function scoreCoin(c){
   // Momentum: moderater Anstieg gut, aber schon stark gepumpte Coins (>80% in 1h) sind eher
   // kurz vor dem Abverkauf als vor dem nächsten Schub → Score-Beitrag wird dort wieder gekappt.
   const chg = c.change1h;
+  const cap = state.momentumCapPct; // von autoImprove() nachjustierbar (Standard 40)
   let momentumScore;
   if(chg <= 0) momentumScore = Math.max(-1, chg/25);
-  else if(chg <= 40) momentumScore = chg/40;
-  else momentumScore = Math.max(0.3, 1 - (chg-40)/60);
+  else if(chg <= cap) momentumScore = chg/cap;
+  else momentumScore = Math.max(0.3, 1 - (chg-cap)/60);
   s += momentumScore*20;
   s += c.ageHours<1?4 : c.ageHours<72?15:8;
   s += Math.min(c.buySellRatio/2.5,1)*15;
@@ -936,6 +968,44 @@ async function fetchRealCoins(){
     return coins.length ? coins.slice(0,50) : null;
   }catch(e){ return null; }
 }
+
+// ---- Fallback-Datenquelle: GeckoTerminal (public API), falls DexScreener gerade ausfällt ----
+async function fetchGeckoCoins(){
+  try{
+    const urls = [
+      'https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?include=base_token&page=1',
+      'https://api.geckoterminal.com/api/v2/networks/solana/new_pools?include=base_token&page=1'
+    ];
+    const responses = await Promise.all(urls.map(u=>fetch(u).catch(()=>null)));
+    if(responses.every(r=>!r || !r.ok)) throw new Error('geckoterminal fetch failed');
+    const jsons = await Promise.all(responses.map(r=> (r && r.ok) ? r.json() : {data:[],included:[]}));
+    const pools = jsons.flatMap(j=>j.data||[]);
+    // "included" enthält die eigentlichen Token-Infos (Adresse/Symbol) zu jedem Pool
+    const tokenMap = {};
+    jsons.forEach(j=>(j.included||[]).forEach(inc=>{ if(inc.type==='token') tokenMap[inc.id]=inc.attributes||{}; }));
+    const seen = new Set(); const coins=[];
+    pools.forEach(p=>{
+      const a = p.attributes || {};
+      const baseTokenId = p.relationships?.base_token?.data?.id;
+      const tokenAttrs = baseTokenId ? tokenMap[baseTokenId] : null;
+      const addr = tokenAttrs?.address;
+      if(!addr || seen.has(addr)) return; seen.add(addr);
+      const symbol = (tokenAttrs?.symbol || (a.name||'').split('/')[0] || '???').trim().slice(0,10);
+      const liquidity = parseFloat(a.reserve_in_usd)||0;
+      const mcap = parseFloat(a.fdv_usd || a.market_cap_usd) || 1;
+      const volume24h = parseFloat(a.volume_usd?.h24) || 0;
+      const change1h = parseFloat(a.price_change_percentage?.h1) || 0;
+      const created = a.pool_created_at ? new Date(a.pool_created_at).getTime() : null;
+      const ageHours = created ? (Date.now()-created)/3600000 : 200;
+      const buys = a.transactions?.h1?.buys || 0, sells = a.transactions?.h1?.sells || 0;
+      const buySellRatio = sells>0 ? buys/sells : (buys>0 ? buys : 1);
+      const price = parseFloat(a.base_token_price_usd) || 0;
+      coins.push({symbol, address:addr, pairAddress:null, liquidity, mcap, volume24h, change1h, ageHours, buySellRatio, price, twitter:null, website:null});
+    });
+    return coins.length ? coins.slice(0,50) : null;
+  }catch(e){ return null; }
+}
+
 function fakeAddr(){
   const chars="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
   let s=""; for(let i=0;i<10;i++) s+=chars[Math.floor(Math.random()*chars.length)];
@@ -956,9 +1026,14 @@ function demoBatch(){
 
 async function runScan(){
   let coins = await fetchRealCoins();
+  let source = 'DexScreener';
+  if(!coins){
+    coins = await fetchGeckoCoins();
+    source = 'GeckoTerminal';
+  }
   const badge = document.getElementById('dataModeBadge');
-  if(coins){ badge.textContent='LIVE'; badge.className='datamode live'; }
-  else { coins = demoBatch(); badge.textContent='DEMO'; badge.className='datamode demo'; }
+  if(coins){ badge.textContent='LIVE'; badge.className='datamode live'; badge.title='Quelle: '+source; }
+  else { coins = demoBatch(); badge.textContent='DEMO'; badge.className='datamode demo'; source='Demo'; badge.title='Demo-Daten (weder DexScreener noch GeckoTerminal erreichbar)'; }
   coins.forEach(c=>{ c.score=scoreCoin(c); c.time=new Date().toLocaleTimeString(); if(c.price) priceMap[c.address]=c.price; if(c.mcap) mcapMap[c.address]=c.mcap; if(c.twitter||c.website) socialMap[c.address]={twitter:c.twitter, website:c.website}; pushPriceHistory(c.address, c.price||c.score); });
   state.totalScanned += coins.length;
   coins.sort((a,b)=>b.score-a.score);
@@ -980,8 +1055,20 @@ async function runScan(){
     const blacklisted = state.blacklist[c.address] && Date.now() < state.blacklist[c.address];
     const confirmed = (confirmMap[c.address]||0) >= 2;
     const roomLeft = state.positions.length < state.maxPositions;
-    if(c.score>=state.threshold && c.liquidity>=state.minLiquidity && confirmed && roomLeft && !inCooldown && !blacklisted && state.botRunning){
-      openPosition(c);
+    const passesGates = c.score>=state.threshold && c.liquidity>=state.minLiquidity
+      && c.buySellRatio>=state.minBuySellRatioGate && c.ageHours>=state.minAgeHoursGate;
+    if(passesGates && confirmed && roomLeft && !inCooldown && !blacklisted && state.botRunning){
+      const rug = rugCache[c.address];
+      if(rug && (Date.now()-rug.ts) < RUG_CACHE_MS){
+        if(rug.safe){
+          openPosition(c);
+        } else {
+          state.blacklist[c.address] = Date.now() + 60*60000; // kritisches Risiko → 1 Std. gesperrt
+          logMsg(`🚫 ${c.symbol} übersprungen — Rugcheck: ${rug.reason}`);
+        }
+      } else {
+        checkRugSafety(c.address); // Ergebnis kommt bis zum nächsten Scan (5s) in den Cache, dann erneut geprüft
+      }
     }
   });
   // je Coin nur das neueste Signal behalten (statt jeden Scan zu stapeln), sonst dopplen sich Einträge bei "alle Coins" schnell
@@ -990,7 +1077,7 @@ async function runScan(){
   state.signals = dedup.slice(0,200);
   const ticker = document.getElementById('tickerInner');
   ticker.innerHTML = coins.slice(0,15).map(c=>`<span>${c.symbol} <b>${c.score}</b></span>`).join('');
-  logMsg(`Scan: ${coins.length} Coins geprüft (${badge.textContent})`);
+  logMsg(`Scan: ${coins.length} Coins geprüft (${badge.textContent} · ${source})`);
   save(); render();
 }
 function positionSizeFor(score){
@@ -1005,7 +1092,8 @@ function openPosition(c, manual){
   const size = manual ? state.tradeSize : positionSizeFor(c.score);
   if(state.balance < size){ logMsg(`Zu wenig Balance für ${c.symbol}`); return; }
   state.balance -= size;
-  state.positions.push({symbol:c.symbol, address:c.address, pairAddress:c.pairAddress, entryPrice:c.price||0, entryMcap:c.mcap||mcapMap[c.address]||0, size, origSize:size, score:c.score, pnlPct:0, peakPct:0, partialTaken:false, openedAt:Date.now(), manual: !!manual});
+  state.positions.push({symbol:c.symbol, address:c.address, pairAddress:c.pairAddress, entryPrice:c.price||0, entryMcap:c.mcap||mcapMap[c.address]||0, size, origSize:size, score:c.score, pnlPct:0, peakPct:0, partialTaken:false, openedAt:Date.now(), manual: !!manual,
+    entryLiquidity:c.liquidity||0, entryVolRatio:(c.mcap>0?(c.volume24h/c.mcap):0), entryMomentum:c.change1h||0, entryAgeHours:c.ageHours||0, entryBuySellRatio:c.buySellRatio||0});
   logMsg(`${manual?'Manuell gekauft':'Gekauft'}: ${c.symbol} für ${size} SOL bei MC ${formatK(c.mcap||mcapMap[c.address]||0)} (Score ${c.score})`);
   playBuySound();
   recordEquity();
@@ -1022,6 +1110,7 @@ function closePosition(p, reasonOverride){
   state.balance += p.size+pnl;
   state.history.unshift({symbol:p.symbol, size:p.size, pnl, pnlPct:effPnlPct.toFixed(1),
     entryPrice:p.entryPrice||0, exitPrice, entryMcap:p.entryMcap||0, exitMcap, score:p.score,
+    entryLiquidity:p.entryLiquidity||0, entryVolRatio:p.entryVolRatio||0, entryMomentum:p.entryMomentum||0, entryAgeHours:p.entryAgeHours||0, entryBuySellRatio:p.entryBuySellRatio||0,
     reason, closedAt:new Date().toLocaleTimeString(), day:new Date().toDateString()});
   logMsg(`Verkauft: ${p.symbol} (${pnl>=0?'+':''}${pnl} SOL, ${reason}) · MC ${formatK(p.entryMcap)} → ${formatK(exitMcap)}`);
   celebrateTrade(p.symbol, pnl, effPnlPct.toFixed(1));
@@ -1077,6 +1166,7 @@ function tickPositions(){
       p.partialTaken = true;
       state.history.unshift({symbol:p.symbol, size:sellSize, pnl, pnlPct:effPct.toFixed(1),
         entryPrice:p.entryPrice||0, exitPrice: priceMap[p.address]||p.entryPrice, entryMcap:p.entryMcap||0, exitMcap: mcapMap[p.address]||p.entryMcap||0,
+        entryLiquidity:p.entryLiquidity||0, entryVolRatio:p.entryVolRatio||0, entryMomentum:p.entryMomentum||0, entryAgeHours:p.entryAgeHours||0, entryBuySellRatio:p.entryBuySellRatio||0,
         score:p.score, reason:'Teilverkauf', closedAt:new Date().toLocaleTimeString(), day:new Date().toDateString()});
       logMsg(`Teilverkauf: ${p.symbol} — Hälfte bei +${p.pnlPct.toFixed(1)}% gesichert (${pnl>=0?'+':''}${pnl} SOL), MC ${formatK(p.entryMcap)} → ${formatK(mcapMap[p.address]||p.entryMcap)}, Rest läuft weiter`);
       recordEquity();
@@ -1128,6 +1218,41 @@ function autoImprove(){
       pushImprovement(`Timeout-Trades bringen im Schnitt nur ${avgToPnl.toFixed(1)}% → Take-Profit auf ${state.takeProfitPct}% und Trailing-Stop-Trigger auf ${state.trailArmPct}% gesenkt, um Gewinne früher zu sichern.`);
     }
   }
+  // ---- Feature-basiertes Lernen: welche Einstiegs-Merkmale unterschieden Gewinner von Verlierern? ----
+  // (statt nur "Trefferquote gut/schlecht" zu betrachten, wird verglichen WARUM Trades gewannen/verloren)
+  const winTrades = recent.filter(h=>h.pnl>0 && h.entryLiquidity!==undefined);
+  const lossTrades = recent.filter(h=>h.pnl<=0 && h.entryLiquidity!==undefined);
+  if(winTrades.length>=2 && lossTrades.length>=2){
+    const avg = (arr,key)=>arr.reduce((a,h)=>a+(h[key]||0),0)/arr.length;
+
+    const winLiq = avg(winTrades,'entryLiquidity'), lossLiq = avg(lossTrades,'entryLiquidity');
+    if(lossLiq>0 && winLiq > lossLiq*1.3 && state.minLiquidity < 20000){
+      state.minLiquidity = Math.round(state.minLiquidity*1.15);
+      changed = true;
+      pushImprovement(`Gewinner hatten im Schnitt deutlich mehr Einstiegs-Liquidität ($${formatK(winLiq)} vs. $${formatK(lossLiq)} bei Verlierern) → Mindest-Liquidität auf $${formatK(state.minLiquidity)} angehoben.`);
+    }
+
+    const winMom = avg(winTrades,'entryMomentum'), lossMom = avg(lossTrades,'entryMomentum');
+    if(lossMom > winMom + 15 && state.momentumCapPct > 15){
+      state.momentumCapPct -= 3; changed = true;
+      pushImprovement(`Verlierer wurden öfter erst nach starkem Kurs-Anstieg gekauft (Ø +${lossMom.toFixed(0)}% vs. +${winMom.toFixed(0)}% bei Gewinnern) → Momentum-Deckel im Score auf ${state.momentumCapPct}% gesenkt, um seltener in bereits gelaufene Pumps einzusteigen.`);
+    }
+
+    const winBSR = avg(winTrades,'entryBuySellRatio'), lossBSR = avg(lossTrades,'entryBuySellRatio');
+    if(winBSR > lossBSR*1.3 && lossBSR>0 && state.minBuySellRatioGate < 2){
+      state.minBuySellRatioGate = +(state.minBuySellRatioGate + 0.15).toFixed(2);
+      changed = true;
+      pushImprovement(`Gewinner hatten ein deutlich besseres Käufer/Verkäufer-Verhältnis (${winBSR.toFixed(2)} vs. ${lossBSR.toFixed(2)} bei Verlierern) → Mindest-Verhältnis fürs Kaufen auf ${state.minBuySellRatioGate} angehoben.`);
+    }
+
+    const winAge = avg(winTrades,'entryAgeHours'), lossAge = avg(lossTrades,'entryAgeHours');
+    if(winAge > lossAge*1.5 && state.minAgeHoursGate < 24){
+      state.minAgeHoursGate = +(state.minAgeHoursGate + 0.5).toFixed(1);
+      changed = true;
+      pushImprovement(`Gewinner-Coins waren im Schnitt reifer (${winAge.toFixed(1)} Std vs. ${lossAge.toFixed(1)} Std bei Verlierern) → Mindestalter fürs Kaufen auf ${state.minAgeHoursGate} Std angehoben.`);
+    }
+  }
+
   if(changed){ document.getElementById('thresholdSlider').value = state.threshold; save(); render(); }
 }
 function pushImprovement(msg){
